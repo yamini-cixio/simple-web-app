@@ -1,6 +1,7 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const Database = require('better-sqlite3');
 const cors = require('cors');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -10,59 +11,59 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({ origin: 'http://localhost:5173' }));
 app.use(express.json());
 
-// MongoDB Connection
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
-
-// Todo Schema
-const todoSchema = new mongoose.Schema({
-  text: { type: String, required: true },
-  completed: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
-});
-
-const Todo = mongoose.model('Todo', todoSchema);
+// SQLite Database
+const db = new Database(path.join(__dirname, 'todos.db'));
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    completed INTEGER DEFAULT 0,
+    createdAt TEXT DEFAULT (datetime('now'))
+  )
+`);
+console.log('SQLite database ready');
 
 // Routes
-app.get('/api/todos', async (req, res) => {
+app.get('/api/todos', (req, res) => {
   try {
-    const todos = await Todo.find().sort({ createdAt: -1 });
-    res.json(todos);
+    const todos = db.prepare('SELECT * FROM todos ORDER BY createdAt DESC').all();
+    res.json(todos.map(formatTodo));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-app.post('/api/todos', async (req, res) => {
+app.post('/api/todos', (req, res) => {
+  const { text } = req.body;
+  if (!text || !text.trim()) {
+    return res.status(400).json({ message: 'Text is required' });
+  }
   try {
-    const todo = new Todo({ text: req.body.text });
-    const saved = await todo.save();
-    res.status(201).json(saved);
+    const result = db.prepare('INSERT INTO todos (text) VALUES (?)').run(text.trim());
+    const todo = db.prepare('SELECT * FROM todos WHERE id = ?').get(result.lastInsertRowid);
+    res.status(201).json(formatTodo(todo));
   } catch (err) {
     res.status(400).json({ message: err.message });
   }
 });
 
-app.put('/api/todos/:id', async (req, res) => {
+app.put('/api/todos/:id', (req, res) => {
   try {
-    const todo = await Todo.findByIdAndUpdate(
-      req.params.id,
-      { completed: req.body.completed },
-      { new: true }
-    );
-    if (!todo) return res.status(404).json({ message: 'Todo not found' });
-    res.json(todo);
+    const { completed } = req.body;
+    const result = db.prepare('UPDATE todos SET completed = ? WHERE id = ?').run(completed ? 1 : 0, req.params.id);
+    if (result.changes === 0) return res.status(404).json({ message: 'Todo not found' });
+    const todo = db.prepare('SELECT * FROM todos WHERE id = ?').get(req.params.id);
+    res.json(formatTodo(todo));
   } catch (err) {
     res.status(400).json({ message: err.message });
   }
 });
 
-app.delete('/api/todos/:id', async (req, res) => {
+app.delete('/api/todos/:id', (req, res) => {
   try {
-    const todo = await Todo.findByIdAndDelete(req.params.id);
-    if (!todo) return res.status(404).json({ message: 'Todo not found' });
+    const result = db.prepare('DELETE FROM todos WHERE id = ?').run(req.params.id);
+    if (result.changes === 0) return res.status(404).json({ message: 'Todo not found' });
     res.json({ message: 'Deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -73,6 +74,10 @@ app.delete('/api/todos/:id', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+function formatTodo(row) {
+  return { _id: row.id, text: row.text, completed: !!row.completed, createdAt: row.createdAt };
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
